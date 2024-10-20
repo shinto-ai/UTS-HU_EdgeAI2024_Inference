@@ -4,10 +4,9 @@ import torch
 import torch.nn as nn
 from torchvision import transforms, models
 from PIL import Image
-import io
-from picamera import PiCamera
-from grove.button import Button
-import grove.grove_led as grove_led
+import cv2
+import numpy as np
+import grovepi
 
 # Grove - Buttonが接続されているデジタルポート番号
 BUTTON_PORT = 2  # D2ポートに接続されていると仮定
@@ -33,17 +32,12 @@ def predict_letter(image, model, class_to_idx, transform):
     idx_to_class = {v: k for k, v in class_to_idx.items()}
     return idx_to_class[predicted.item()]
 
-def capture_image(camera):
-    stream = io.BytesIO()
-    camera.capture(stream, format='jpeg')
-    stream.seek(0)
-    return Image.open(stream)
-
 def main():
     print("Using CPU for inference")
 
-    # Grove Buttonのセットアップ
-    button = Button(BUTTON_PORT)
+    # ボタンのセットアップ
+    grovepi.pinMode(BUTTON_PORT, "INPUT")
+    time.sleep(1)  # セットアップ後の待機時間
 
     # モデルのロード
     model_path = "best_asl_alphabet_model.pth"
@@ -57,22 +51,64 @@ def main():
     ])
 
     # カメラの初期化
-    with PiCamera() as camera:
-        camera.resolution = (640, 480)
-        camera.framerate = 30
-        time.sleep(2)  # カメラのウォームアップ時間
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        raise RuntimeError("Cannot open camera")
 
-        print("Ready to capture. Press the Grove button to capture and predict. Press Ctrl+C to exit.")
-        try:
-            while True:
-                if button.is_pressed():
-                    print("Button pressed, capturing image...")
-                    image = capture_image(camera)
-                    predicted_label = predict_letter(image, model, class_to_idx, transform)
-                    print(f"Predicted letter: {predicted_label}")
-                    time.sleep(0.5)  # デバウンス用のディレイ
-        except KeyboardInterrupt:
-            print("Stopping the program...")
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+    print("Ready to capture. Press the Grove button to capture and predict. Press 'q' to exit.")
+
+    try:
+        while True:
+            # カメラからフレームを取得
+            ret, frame = cap.read()
+            if not ret:
+                print("Failed to get frame from camera")
+                break
+
+            # フレームを正方形にクロップ
+            height, width = frame.shape[:2]
+            min_dim = min(height, width)
+            start_x = (width - min_dim) // 2
+            start_y = (height - min_dim) // 2
+            square_frame = frame[start_y:start_y + min_dim, start_x:start_x + min_dim]
+
+            # プレビューに表示するためにコピーを作成
+            preview_frame = square_frame.copy()
+
+            # ボタンの状態をチェック
+            button_status = grovepi.digitalRead(BUTTON_PORT)
+            if button_status == 1:
+                # 画像をPIL形式に変換
+                image = cv2.cvtColor(square_frame, cv2.COLOR_BGR2RGB)
+                image = Image.fromarray(image)
+
+                # 予測を実行
+                predicted_label = predict_letter(image, model, class_to_idx, transform)
+                print(f"Predicted letter: {predicted_label}")
+
+                # 予測結果をプレビューに表示
+                cv2.putText(preview_frame, f"Prediction: {predicted_label}", (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
+
+                time.sleep(0.5)  # デバウンス用のディレイ
+
+            # プレビューを表示
+            cv2.imshow('ASL Recognition', preview_frame)
+
+            # 'q'キーが押された場合、プログラムを終了
+            key = cv2.waitKey(1)
+            if key == ord('q'):
+                print("Exiting the program...")
+                break
+
+    except KeyboardInterrupt:
+        print("Program interrupted by user")
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     main()
